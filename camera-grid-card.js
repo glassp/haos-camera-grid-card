@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.3.0";
+const CARD_VERSION = "1.4.0";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -772,10 +772,11 @@ const isPlaying = (v) =>
  * "auto" (like high, but may fall back to low).
  */
 class AdaptiveStream {
-  constructor(cfg, makeHigh, makeLow) {
+  constructor(cfg, makeHigh, makeLow, label = "") {
     this._makeHigh = makeHigh;
     this._makeLow = makeLow;
     this._cfg = cfg;
+    this._label = label;
     this._mode = "low";
     this._lowEl = null;
     this._highEl = null;
@@ -783,8 +784,7 @@ class AdaptiveStream {
     this._highSince = 0;
     this._readyAt = 0;
     this._retryAt = 0;
-    this._stalls = [];
-    this._bufSince = 0;
+    this._buffering = [];
     this._timer = null;
     this._onNet = () => this._apply();
     this.el = document.createElement("div");
@@ -811,11 +811,34 @@ class AdaptiveStream {
     this.el.remove();
   }
 
+  _log(...args) {
+    if (this._cfg.debug) console.info(`[camera-grid-card] ${this._label}:`, ...args);
+  }
+
+  // Snapshot for debugging (console: [...window.__cameraGridCards][0].debugState()).
+  state() {
+    return {
+      label: this._label,
+      mode: this._mode,
+      quality: this.quality,
+      wantHigh: this._wantHigh(),
+      netPoor: this._netPoor(),
+      low: !!this._lowEl,
+      lowPlaying: isPlaying(this._lowEl?.video),
+      high: !!this._highEl,
+      highReady: this._highReady,
+      highPlaying: isPlaying(this._highEl?.video),
+      highPendingSeconds: this._highEl && !this._highReady
+        ? Math.round((Date.now() - this._highSince) / 1000) : 0,
+      retryInSeconds: Math.max(0, Math.round((this._retryAt - Date.now()) / 1000)),
+    };
+  }
+
   setMode(mode) {
+    if (mode !== this._mode) this._log(`mode ${this._mode} -> ${mode}`);
     this._mode = mode;
     this._retryAt = 0;
-    this._stalls = [];
-    this._bufSince = 0;
+    this._buffering = [];
     this._apply();
   }
 
@@ -826,8 +849,11 @@ class AdaptiveStream {
   _netPoor() {
     const n = navigator.connection;
     if (!n) return false;
+    // These describe the browser's *internet* estimate, not the LAN link to
+    // Home Assistant / go2rtc, so only the unambiguous cases are used by
+    // default; the downlink threshold is opt-in (min_downlink_mbps > 0).
     if (n.saveData) return true;
-    if (["slow-2g", "2g", "3g"].includes(n.effectiveType)) return true;
+    if (["slow-2g", "2g"].includes(n.effectiveType)) return true;
     const min = Number(this._cfg.min_downlink_mbps);
     return min > 0 && n.downlink > 0 && n.downlink < min;
   }
@@ -862,16 +888,17 @@ class AdaptiveStream {
         this._highEl = this._make("high", 0);
         this._highReady = false;
         this._highSince = Date.now();
+        this._log("loading high quality");
       }
     } else if (!this._lowEl) {
       this._lowEl = this._make("low", 1);
     }
   }
 
-  _downgrade() {
+  _downgrade(reason) {
+    this._log(`falling back to low: ${reason}`);
     this._retryAt = Date.now() + Number(this._cfg.retry_high_seconds) * 1000;
-    this._stalls = [];
-    this._bufSince = 0;
+    this._buffering = [];
     this._apply();
   }
 
@@ -881,18 +908,13 @@ class AdaptiveStream {
     if (wantHigh !== !!this._highEl || (!wantHigh && !this._lowEl)) this._apply();
 
     const hv = this._highEl?.video;
-    if (hv && !hv._cgcWatched) {
-      hv._cgcWatched = true;
-      hv.addEventListener("waiting", () => {
-        if (this._highReady) this._stalls.push(Date.now());
-      });
-    }
 
     if (this._highEl && wantHigh) {
       if (!this._highReady && isPlaying(hv)) {
         // High is really playing: put it on top, then release low.
         this._highReady = true;
         this._readyAt = now;
+        this._log(`high quality playing after ${Math.round((now - this._highSince) / 100) / 10}s`);
         this._highEl.style.zIndex = "2";
       }
       if (this._highReady && this._lowEl && now - this._readyAt > 400) {
@@ -907,19 +929,19 @@ class AdaptiveStream {
 
     if (!this._highReady) {
       // High never got going: stop wasting bandwidth for a while.
-      if (now - this._highSince > 20000) {
-        this._downgrade();
+      const limit = Number(this._cfg.upgrade_timeout_seconds) * 1000;
+      if (now - this._highSince > limit) {
+        this._downgrade(`high not playing after ${limit / 1000}s`);
       }
       return;
     }
-    this._stalls = this._stalls.filter((t) => now - t < 30000);
-    if (hv && hv.readyState < 3) this._bufSince ||= now;
-    else this._bufSince = 0;
-    if (
-      this._stalls.length >= Number(this._cfg.stall_limit) ||
-      (this._bufSince && now - this._bufSince > 5000)
-    ) {
-      this._downgrade();
+    // Time spent buffering (not events: live streams "wait" briefly all the
+    // time) within the last 30 s.
+    if (hv && hv.readyState < 3) this._buffering.push(now);
+    this._buffering = this._buffering.filter((t) => now - t < 30000);
+    const buffered = this._buffering.length * 0.5;
+    if (buffered >= Number(this._cfg.stall_seconds)) {
+      this._downgrade(`buffered ${buffered}s in the last 30s`);
     }
   }
 }
@@ -970,6 +992,11 @@ class CameraGridCard extends HTMLElement {
     if (!config || !Array.isArray(config.cameras)) {
       throw new Error("`cameras` must be a list");
     }
+    // HA calls setConfig repeatedly (e.g. leaving edit mode); rebuilding would
+    // tear down and renegotiate every stream for nothing.
+    const json = JSON.stringify(config);
+    if (json === this._configJson && this._tiles.size) return;
+    this._configJson = json;
     this._config = {
       columns: 2,
       aspect_ratio: "16:9",
@@ -979,9 +1006,11 @@ class CameraGridCard extends HTMLElement {
       show_titles: true,
       grid_quality: "low",
       fullscreen_quality: "auto",
-      min_downlink_mbps: 3,
-      stall_limit: 3,
+      min_downlink_mbps: 0,
+      stall_seconds: 4,
       retry_high_seconds: 60,
+      upgrade_timeout_seconds: 60,
+      debug: false,
       ...config,
     };
     this._render();
@@ -1005,10 +1034,17 @@ class CameraGridCard extends HTMLElement {
   }
 
   connectedCallback() {
+    (window.__cameraGridCards ||= new Set()).add(this);
     for (const a of this._adaptive.values()) a.start();
   }
 
+  // window.__cameraGridCards: inspect adaptive streams from the console.
+  debugState() {
+    return [...this._adaptive.values()].map((a) => a.state());
+  }
+
   disconnectedCallback() {
+    window.__cameraGridCards?.delete(this);
     this._closeOverlay();
     for (const a of this._adaptive.values()) a.stop();
   }
@@ -1053,7 +1089,7 @@ class CameraGridCard extends HTMLElement {
       ];
     }
     if (makers) {
-      const a = new AdaptiveStream(this._config, ...makers);
+      const a = new AdaptiveStream(this._config, ...makers, this._id(cam));
       a.setMode(this._config.grid_quality);
       this._adaptive.set(this._id(cam), a);
       return a.el;
@@ -1245,13 +1281,15 @@ const QUALITY_OPTIONS = [
   { value: "auto", label: "Auto (falls back to low on poor network)" },
 ];
 
-const EDITOR_SCHEMA = [
+const num = (extra = {}) => ({ number: { mode: "box", ...extra } });
+
+const GLOBAL_SCHEMA = [
   { name: "go2rtc_url", selector: { text: {} } },
   {
     type: "grid",
     name: "",
     schema: [
-      { name: "columns", selector: { number: { min: 1, max: 8, mode: "box" } } },
+      { name: "columns", selector: num({ min: 1, max: 8 }) },
       { name: "aspect_ratio", selector: { text: {} } },
       {
         name: "fit",
@@ -1265,47 +1303,43 @@ const EDITOR_SCHEMA = [
           },
         },
       },
-      { name: "trigger_state", selector: { text: {} } },
-      {
-        name: "auto_close_seconds",
-        selector: { number: { min: 0, max: 3600, mode: "box", unit_of_measurement: "s" } },
-      },
       { name: "show_titles", selector: { boolean: {} } },
-      { name: "grid_quality", selector: { select: { mode: "dropdown", options: QUALITY_OPTIONS } } },
-      { name: "fullscreen_quality", selector: { select: { mode: "dropdown", options: QUALITY_OPTIONS } } },
-      {
-        name: "min_downlink_mbps",
-        selector: { number: { min: 0, max: 50, step: 0.5, mode: "box", unit_of_measurement: "Mbit/s" } },
-      },
+      { name: "trigger_state", selector: { text: {} } },
+      { name: "auto_close_seconds", selector: num({ min: 0, max: 3600, unit_of_measurement: "s" }) },
     ],
   },
   {
-    name: "cameras",
-    selector: {
-      object: {
-        multiple: true,
-        label_field: "title",
-        fields: {
-          title: { label: "Title", selector: { text: {} } },
-          entity: {
-            label: "Camera entity (instead of a go2rtc stream)",
-            selector: { entity: { domain: "camera" } },
-          },
-          entity_low: {
-            label: "Low-quality camera entity (optional, with entity)",
-            selector: { entity: { domain: "camera" } },
-          },
-          stream: { label: "go2rtc stream name (high quality)", selector: { text: {} } },
-          stream_low: { label: "go2rtc low-quality stream (optional)", selector: { text: {} } },
-          url: { label: "go2rtc URL (override)", selector: { text: {} } },
-          id: { label: "ID (defaults to stream)", selector: { text: {} } },
-          triggers: {
-            label: "Trigger entities",
-            selector: { entity: { multiple: true } },
-          },
-        },
-      },
-    },
+    type: "expandable",
+    name: "",
+    title: "Quality",
+    icon: "mdi:video-high-definition",
+    schema: [
+      { name: "grid_quality", selector: { select: { mode: "dropdown", options: QUALITY_OPTIONS } } },
+      { name: "fullscreen_quality", selector: { select: { mode: "dropdown", options: QUALITY_OPTIONS } } },
+      { name: "min_downlink_mbps", selector: num({ min: 0, max: 50, step: 0.5, unit_of_measurement: "Mbit/s" }) },
+      { name: "stall_seconds", selector: num({ min: 1, max: 30, unit_of_measurement: "s" }) },
+      { name: "retry_high_seconds", selector: num({ min: 5, max: 3600, unit_of_measurement: "s" }) },
+      { name: "upgrade_timeout_seconds", selector: num({ min: 5, max: 600, unit_of_measurement: "s" }) },
+      { name: "debug", selector: { boolean: {} } },
+    ],
+  },
+];
+
+const CAMERA_SCHEMA = [
+  { name: "title", selector: { text: {} } },
+  { name: "entity", selector: { entity: { domain: "camera" } } },
+  { name: "entity_low", selector: { entity: { domain: "camera" } } },
+  { name: "stream", selector: { text: {} } },
+  { name: "stream_low", selector: { text: {} } },
+  { name: "triggers", selector: { entity: { multiple: true } } },
+  {
+    type: "expandable",
+    name: "",
+    title: "Advanced",
+    schema: [
+      { name: "url", selector: { text: {} } },
+      { name: "id", selector: { text: {} } },
+    ],
   },
 ];
 
@@ -1314,52 +1348,190 @@ const EDITOR_LABELS = {
   columns: "Grid columns",
   aspect_ratio: "Tile aspect ratio",
   fit: "Video fit",
+  show_titles: "Show titles",
   trigger_state: "State that triggers full screen",
   auto_close_seconds: "Auto-close after (0 = manual only)",
-  show_titles: "Show titles",
   grid_quality: "Quality in the grid",
   fullscreen_quality: "Quality in full screen",
-  min_downlink_mbps: "Auto: minimum network speed for high (0 = ignore)",
-  cameras: "Cameras",
+  min_downlink_mbps: "Auto: also fall back below this browser-reported speed (0 = off)",
+  stall_seconds: "Auto: fall back after buffering this long (per 30 s)",
+  retry_high_seconds: "Auto: retry high after a fallback",
+  upgrade_timeout_seconds: "Auto: give up on high if not playing after",
+  debug: "Log quality switching to the browser console",
+  title: "Title",
+  entity: "Camera entity (high quality if a low one is set)",
+  entity_low: "Low-quality camera entity (optional)",
+  stream: "go2rtc stream (high quality if a low one is set)",
+  stream_low: "Low-quality go2rtc stream (optional)",
+  triggers: "Trigger entities (open this camera full screen)",
+  url: "go2rtc URL (overrides the default)",
+  id: "ID (defaults to stream or entity)",
 };
 
+const GLOBAL_DEFAULTS = {
+  columns: 2,
+  aspect_ratio: "16:9",
+  fit: "cover",
+  trigger_state: "on",
+  auto_close_seconds: 0,
+  show_titles: true,
+  grid_quality: "low",
+  fullscreen_quality: "auto",
+  min_downlink_mbps: 0,
+  stall_seconds: 4,
+  retry_high_seconds: 60,
+  upgrade_timeout_seconds: 60,
+  debug: false,
+};
+
+// Drop empty values so the saved YAML stays tidy.
+function cleanCamera(cam) {
+  const out = {};
+  for (const [k, v] of Object.entries(cam)) {
+    if (v === "" || v == null || (Array.isArray(v) && !v.length)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 class CameraGridCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this._forms = [];
+    this._built = false;
+  }
+
   setConfig(config) {
     this._config = config;
-    this._render();
+    if (!this._built) this._build();
+    this._sync();
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (this._form) this._form.hass = hass;
+    for (const f of this._forms) f.hass = hass;
   }
 
-  _render() {
-    if (!this._form) {
-      this._form = document.createElement("ha-form");
-      this._form.computeLabel = (s) => EDITOR_LABELS[s.name] || s.name;
-      this._form.addEventListener("value-changed", (ev) => {
-        this.dispatchEvent(
-          new CustomEvent("config-changed", {
-            detail: { config: { ...ev.detail.value, type: this._config.type } },
-            bubbles: true,
-            composed: true,
-          })
-        );
+  _label = (s) => EDITOR_LABELS[s.name] || s.name;
+
+  _build() {
+    this._built = true;
+    this.innerHTML = `
+      <style>
+        .cgc-section { margin: 16px 0 8px; font-weight: 500; }
+        .cgc-cam { border: 1px solid var(--divider-color); border-radius: 8px;
+                   margin-bottom: 12px; }
+        .cgc-cam > summary { cursor: pointer; padding: 10px 12px; display:flex;
+                             align-items:center; gap:4px; list-style:none; }
+        .cgc-cam > summary .name { flex:1; font-weight:500; overflow:hidden;
+                                   text-overflow:ellipsis; white-space:nowrap; }
+        .cgc-cam .body { padding: 0 12px 12px; }
+        .cgc-btn { background: none; border: 1px solid var(--divider-color);
+                   border-radius: 6px; color: var(--primary-text-color);
+                   cursor: pointer; padding: 4px 8px; font: inherit; }
+        .cgc-btn:disabled { opacity: .4; cursor: default; }
+        .cgc-add { margin-top: 4px; padding: 8px 12px; }
+      </style>
+      <div class="cgc-global"></div>
+      <div class="cgc-section">Cameras</div>
+      <div class="cgc-cams"></div>
+      <button class="cgc-btn cgc-add" type="button">+ Add camera</button>`;
+    this._globalForm = this._makeForm(GLOBAL_SCHEMA, (value) => {
+      this._emit({ ...value, cameras: this._cameras(), type: this._config.type });
+    });
+    this.querySelector(".cgc-global").appendChild(this._globalForm);
+    this.querySelector(".cgc-add").addEventListener("click", () => {
+      this._emit({ ...this._config, cameras: [...this._cameras(), {}] });
+    });
+  }
+
+  _makeForm(schema, onChange) {
+    const form = document.createElement("ha-form");
+    form.computeLabel = this._label;
+    form.schema = schema;
+    form.hass = this._hass;
+    form.addEventListener("value-changed", (ev) => {
+      ev.stopPropagation();
+      onChange(ev.detail.value);
+    });
+    this._forms.push(form);
+    return form;
+  }
+
+  _cameras() {
+    return Array.isArray(this._config.cameras) ? this._config.cameras : [];
+  }
+
+  _emit(config) {
+    this._config = config;
+    this._sync();
+    this.dispatchEvent(
+      new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true })
+    );
+  }
+
+  _camTitle(cam, i) {
+    return cam.title || cam.entity || cam.stream || `Camera ${i + 1}`;
+  }
+
+  _sync() {
+    this._globalForm.hass = this._hass;
+    this._globalForm.data = { ...GLOBAL_DEFAULTS, ...this._config };
+
+    const cams = this._cameras();
+    const list = this.querySelector(".cgc-cams");
+    if (list.children.length !== cams.length) this._rebuildRows(list, cams);
+    cams.forEach((cam, i) => {
+      const row = list.children[i];
+      row.querySelector(".name").textContent = this._camTitle(cam, i);
+      row._form.data = cam;
+      row.querySelector(".up").disabled = i === 0;
+      row.querySelector(".down").disabled = i === cams.length - 1;
+    });
+  }
+
+  _rebuildRows(list, cams) {
+    const keep = this._forms.filter((f) => f === this._globalForm);
+    this._forms = keep;
+    list.innerHTML = "";
+    cams.forEach((cam, i) => {
+      const row = document.createElement("details");
+      row.className = "cgc-cam";
+      row.open = cams.length <= 3 || !cam.entity && !cam.stream;
+      row.innerHTML = `
+        <summary>
+          <span class="name"></span>
+          <button type="button" class="cgc-btn up" title="Move up">&uarr;</button>
+          <button type="button" class="cgc-btn down" title="Move down">&darr;</button>
+          <button type="button" class="cgc-btn del" title="Remove">&times;</button>
+        </summary>
+        <div class="body"></div>`;
+      row._form = this._makeForm(CAMERA_SCHEMA, (value) => {
+        const next = [...this._cameras()];
+        next[i] = cleanCamera(value);
+        this._emit({ ...this._config, cameras: next });
       });
-      this.appendChild(this._form);
-    }
-    this._form.hass = this._hass;
-    this._form.schema = EDITOR_SCHEMA;
-    this._form.data = {
-      columns: 2,
-      aspect_ratio: "16:9",
-      fit: "cover",
-      trigger_state: "on",
-      auto_close_seconds: 0,
-      show_titles: true,
-      ...this._config,
-    };
+      row.querySelector(".body").appendChild(row._form);
+      const act = (cls, fn) =>
+        row.querySelector(cls).addEventListener("click", (ev) => {
+          ev.preventDefault(); // do not toggle the <details>
+          ev.stopPropagation();
+          fn(ev);
+        });
+      act(".up", () => this._move(i, -1));
+      act(".down", () => this._move(i, 1));
+      act(".del", () => {
+        const next = this._cameras().filter((_, j) => j !== i);
+        this._emit({ ...this._config, cameras: next });
+      });
+      list.appendChild(row);
+    });
+  }
+
+  _move(i, d) {
+    const next = [...this._cameras()];
+    [next[i], next[i + d]] = [next[i + d], next[i]];
+    this._emit({ ...this._config, cameras: next });
   }
 }
 
