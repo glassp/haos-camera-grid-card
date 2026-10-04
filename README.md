@@ -60,8 +60,11 @@ A visual editor is included. Its camera list uses the object selector with `fiel
 ## Limitations
 
 - go2rtc streams only. The go2rtc host must be reachable from the browser; the card connects to `<go2rtc_url>/api/ws?src=<stream>` over WebSocket. No scripts are loaded from go2rtc.
-- Untested against real hardware at the time of writing.
 
 ## Credits
 
 The bundled player is go2rtc's `video-rtc.js` (MIT, Copyright (c) 2022 Alexey Khit, <https://github.com/AlexxIT/go2rtc>).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
