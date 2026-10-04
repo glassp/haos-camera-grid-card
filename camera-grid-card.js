@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.4.0";
+const CARD_VERSION = "1.4.1";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -754,6 +754,25 @@ function deepVideo(node) {
   return null;
 }
 
+// Home Assistant's live view renders the <video> at its own aspect ratio,
+// top-aligned in a card of its own size, ignoring our tile and `fit`. Force
+// the video and every wrapper up to our element to fill the tile, and let the
+// video honour --cgc-fit (inherited through the shadow roots).
+function fitEntityVideo(wrap) {
+  const v = deepVideo(wrap);
+  if (!v || v._cgcFit) return;
+  v._cgcFit = true;
+  v.style.setProperty("object-fit", "var(--cgc-fit, cover)", "important");
+  v.style.setProperty("background", "#000", "important");
+  for (let n = v; n && n !== wrap; ) {
+    if (n.nodeType === 1) {
+      for (const prop of ["width", "height"]) n.style.setProperty(prop, "100%", "important");
+      n.style.setProperty("min-height", "0", "important");
+    }
+    n = n.parentNode instanceof ShadowRoot ? n.parentNode.host : n.parentNode;
+  }
+}
+
 // "Has real frames". Players pause themselves in hidden tabs, so a paused
 // video only counts as not playing while the tab is visible.
 const isPlaying = (v) =>
@@ -946,18 +965,6 @@ class AdaptiveStream {
   }
 }
 
-// "16:9" | "16x9" | "1.78" | "56%" -> width / height as a number
-function parseAspect(v) {
-  const s = String(v).trim();
-  let r = NaN;
-  if (s.endsWith("%")) r = 100 / parseFloat(s);
-  else if (/[:x]/.test(s)) {
-    const [w, h] = s.split(/[:x]/).map(parseFloat);
-    r = w / h;
-  } else r = parseFloat(s);
-  return Number.isFinite(r) && r > 0 ? r : 16 / 9;
-}
-
 const STREAM_CSS = `
   camera-grid-stream { display:block; width:100%; height:100%; }
   camera-grid-stream video { width:100%; height:100%; object-fit: var(--cgc-fit, cover); }
@@ -1125,7 +1132,6 @@ class CameraGridCard extends HTMLElement {
           camera_view: "live",
           show_name: false,
           show_state: false,
-          aspect_ratio: String(c.aspect_ratio),
           fit_mode: c.fit,
           tap_action: { action: "none" },
           hold_action: { action: "none" },
@@ -1137,6 +1143,15 @@ class CameraGridCard extends HTMLElement {
         if (this._hass) card.hass = this._hass;
         wrap.appendChild(card);
         this._entityCards.push(card);
+        // HA renders (and re-renders) the player asynchronously.
+        const fit = setInterval(() => {
+          if (!wrap.isConnected) {
+            if (wrap._wasConnected) clearInterval(fit);
+            return;
+          }
+          wrap._wasConnected = true;
+          fitEntityVideo(wrap);
+        }, 500);
       })
       .catch(fail);
     return wrap;
@@ -1150,7 +1165,6 @@ class CameraGridCard extends HTMLElement {
     this._adaptive = new Map();
     const c = this._config;
     const root = this.shadowRoot;
-    const ar = parseAspect(c.aspect_ratio);
     // Full-screen styles, applied to the very same tile element that is in
     // the grid, so the already-playing stream is never remounted. Written as
     // two separate rules because one unsupported selector would void a list.
@@ -1159,8 +1173,6 @@ class CameraGridCard extends HTMLElement {
                  height:100dvh; border-radius:0; cursor:default;
                  z-index:99999; --cgc-fit:contain; }
         ${sel} .close { display:block; }
-        ${sel} .entity-view > * { width:min(100vw, calc(100vh * ${ar}));
-                                  width:min(100vw, calc(100dvh * ${ar})); }
         ${sel} .title { left:16px; top:20px; bottom:auto; font-size:16px; }`;
     root.innerHTML = `
       <style>
@@ -1176,21 +1188,23 @@ class CameraGridCard extends HTMLElement {
                 border-radius: var(--ha-card-border-radius, 12px);
                 cursor:pointer; }
         .title { position:absolute; left:8px; bottom:6px; color:#fff;
-                 font-size:12px; text-shadow:0 0 4px #000; pointer-events:none; }
+                 font-size:12px; text-shadow:0 0 4px #000; pointer-events:none;
+                 z-index:10; }
         .close { display:none; position:absolute;
                  top:max(12px, env(safe-area-inset-top)); right:12px;
                  width:48px; height:48px; border-radius:50%; border:0;
                  background:rgba(0,0,0,.6); color:#fff; font-size:28px;
-                 line-height:1; cursor:pointer; z-index:1; }
+                 line-height:1; cursor:pointer; z-index:10; }
         ${openRules(".tile:popover-open")}
         ${openRules(".tile.open")}
         .adaptive { position:absolute; inset:0; }
-        .entity-view { position:absolute; inset:0; display:flex;
-                       align-items:center; justify-content:center;
+        .entity-view { position:absolute; inset:0; overflow:hidden;
                        pointer-events:none; color:#fff; font-size:12px;
+                       background:#000;
                        --ha-card-border-radius:0; --ha-card-box-shadow:none;
-                       --ha-card-border-width:0; }
-        .entity-view > * { display:block; width:100%; }
+                       --ha-card-border-width:0; --ha-card-background:#000;
+                       --card-background-color:#000; }
+        .entity-view > * { display:block; width:100%; height:100%; }
         .placeholder { position:absolute; inset:0; display:flex;
                        align-items:center; justify-content:center;
                        color:#bbb; font-size:12px; text-align:center; }
