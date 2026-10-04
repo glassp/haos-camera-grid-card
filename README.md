@@ -23,9 +23,12 @@ fit: cover
 trigger_state: "on"
 auto_close_seconds: 0
 show_titles: true
+grid_quality: low
+fullscreen_quality: auto
 cameras:
   - title: Front door
-    stream: frontdoor
+    stream: frontdoor            # high quality
+    stream_low: frontdoor_low    # optional low quality
     triggers:
       - binary_sensor.frontdoor_person
   - title: Garden
@@ -43,7 +46,13 @@ cameras:
 | `trigger_state` | `on` | State (or list of states) that opens the overlay. Use `"*"` to fire on every state change. |
 | `auto_close_seconds` | `0` | Close the overlay automatically after N seconds; `0` means manual only. |
 | `show_titles` | `true` | Show camera titles on tiles. |
-| `cameras[].stream` | – | go2rtc stream name. Set either `stream` or `entity`. |
+| `grid_quality` | `low` | Quality in the grid: `low`, `high` or `auto` (see below). |
+| `fullscreen_quality` | `auto` | Quality in full screen: `low`, `high` or `auto`. |
+| `min_downlink_mbps` | `3` | `auto` only: fall back to low below this network speed (Chromium browsers). `0` ignores it. |
+| `stall_limit` | `3` | `auto` only: fall back to low after this many stalls of the high stream within 30 s. |
+| `retry_high_seconds` | `60` | `auto` only: wait this long after a fallback before trying high again. |
+| `cameras[].stream` | – | go2rtc stream name (the high-quality one if you also set `stream_low`). Set either `stream` or `entity`. |
+| `cameras[].stream_low` | – | Optional low-quality go2rtc stream for the same camera. Enables the quality switching below. |
 | `cameras[].entity` | – | Home Assistant `camera.*` entity (alias: `camera_entity`). Rendered with Home Assistant's own live camera view. |
 | `cameras[].title` | – | Display title. |
 | `cameras[].url` | `go2rtc_url` | Per-camera go2rtc base URL override. |
@@ -51,6 +60,24 @@ cameras:
 | `cameras[].triggers` | – | Entities that open this camera when they change to `trigger_state`. |
 
 A visual editor is included. Its camera list uses the object selector with `fields`, which needs a recent Home Assistant.
+
+## Multiple qualities
+
+go2rtc has no adaptive bitrate: one stream name is one source, and the browser and go2rtc only negotiate codecs and transport (WebRTC, MSE, HLS), not quality. So different qualities have to be separate go2rtc streams, and this card does the switching. Define both in go2rtc, for example:
+
+```yaml
+streams:
+  frontdoor: rtsp://cam/main
+  frontdoor_low: rtsp://cam/sub      # or: ffmpeg:frontdoor#video=h264#height=480
+```
+
+and give the camera `stream` and `stream_low`. Each mode behaves like this:
+
+- `low`: only the low stream is used.
+- `high`: the low stream starts first for a fast start. The high stream loads on top of it, and takes over once it is really playing. The low stream is then released.
+- `auto`: like `high`, but falls back to low when the network looks poor, and tries high again after `retry_high_seconds`. "Poor" means the browser reports data saver, a 3G or slower connection, or a downlink below `min_downlink_mbps` (Network Information API, Chromium only), or the high stream stalls `stall_limit` times in 30 s or buffers for more than 5 s. If high has not started after 20 s, it gives up for a while.
+
+Defaults: tiles in the grid stay on `low` (small tiles, many streams), and full screen uses `auto`. Set `grid_quality: auto` to upgrade grid tiles as well. Cameras with only a `stream`, and camera entities, are unaffected.
 
 ## Behavior
 
@@ -63,6 +90,7 @@ A visual editor is included. Its camera list uses the object selector with `fiel
 ## Limitations
 
 - go2rtc streams: the go2rtc host must be reachable from the browser; the card connects to `<go2rtc_url>/api/ws?src=<stream>` over WebSocket. No scripts are loaded from go2rtc.
+- Quality switching works for go2rtc streams only, not for camera entities (use the entity's own stream quality, or a go2rtc stream).
 - Camera entities: shown through Home Assistant's built-in picture-entity live view (WebRTC/HLS as HA decides), so what plays depends on your camera integration. Tiles are live-only, with no PTZ or other controls.
 
 ## Credits
