@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "0.1.1";
+const CARD_VERSION = "0.1.2";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -748,7 +748,8 @@ class CameraGridCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._overlay = null;
+    this._open = null;
+    this._tiles = new Map();
     this._closeTimer = null;
   }
 
@@ -824,31 +825,55 @@ class CameraGridCard extends HTMLElement {
   }
 
   _render() {
+    this._closeOverlay();
     const c = this._config;
     const root = this.shadowRoot;
+    // Full-screen styles, applied to the very same tile element that is in
+    // the grid, so the already-playing stream is never remounted. Written as
+    // two separate rules because one unsupported selector would void a list.
+    const openRules = (sel) => `
+        ${sel} { position:fixed; inset:0; width:100vw; height:100vh;
+                 height:100dvh; border-radius:0; cursor:default;
+                 z-index:99999; --cgc-fit:contain; }
+        ${sel} .close { display:block; }
+        ${sel} .title { left:16px; top:20px; bottom:auto; font-size:16px; }`;
     root.innerHTML = `
       <style>
         ${STREAM_CSS}
         :host { display:block; --cgc-fit:${c.fit}; }
         .grid { display:grid; gap:4px;
                 grid-template-columns: repeat(${Number(c.columns) || 2}, 1fr); }
-        .tile { position:relative; overflow:hidden; background:#000;
+        .cell { position:relative;
+                aspect-ratio:${String(c.aspect_ratio).replace(":", " / ")}; }
+        .tile { position:absolute; inset:0; width:auto; height:auto; margin:0;
+                padding:0; border:0; display:block; overflow:hidden;
+                background:#000; color:#fff;
                 border-radius: var(--ha-card-border-radius, 12px);
-                aspect-ratio:${String(c.aspect_ratio).replace(":", " / ")};
                 cursor:pointer; }
         .title { position:absolute; left:8px; bottom:6px; color:#fff;
                  font-size:12px; text-shadow:0 0 4px #000; pointer-events:none; }
+        .close { display:none; position:absolute;
+                 top:max(12px, env(safe-area-inset-top)); right:12px;
+                 width:48px; height:48px; border-radius:50%; border:0;
+                 background:rgba(0,0,0,.6); color:#fff; font-size:28px;
+                 line-height:1; cursor:pointer; z-index:1; }
+        ${openRules(".tile:popover-open")}
+        ${openRules(".tile.open")}
         .empty { padding:16px; color:var(--secondary-text-color); }
       </style>
       <div class="grid"></div>`;
+    this._tiles = new Map();
     const grid = root.querySelector(".grid");
     if (!c.cameras.length) {
       grid.innerHTML = `<div class="empty">No cameras configured.</div>`;
       return;
     }
     for (const cam of c.cameras) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
       const tile = document.createElement("div");
       tile.className = "tile";
+      tile.setAttribute("popover", "manual");
       tile.appendChild(makeStream(cam, c.go2rtc_url));
       if (c.show_titles && cam.title) {
         const t = document.createElement("div");
@@ -856,42 +881,37 @@ class CameraGridCard extends HTMLElement {
         t.textContent = cam.title;
         tile.appendChild(t);
       }
-      tile.addEventListener("click", () => this.focusCamera(this._id(cam)));
-      grid.appendChild(tile);
+      const close = document.createElement("button");
+      close.className = "close";
+      close.setAttribute("aria-label", "Close");
+      close.innerHTML = "&times;";
+      close.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._closeOverlay();
+      });
+      tile.appendChild(close);
+      tile.addEventListener("click", () => {
+        if (this._open !== tile) this.focusCamera(this._id(cam));
+      });
+      cell.appendChild(tile);
+      grid.appendChild(cell);
+      this._tiles.set(this._id(cam), tile);
     }
   }
 
   focusCamera(id) {
-    const cam = this._config.cameras.find((x) => this._id(x) === id);
-    if (!cam) return;
+    const tile = this._tiles?.get(id);
+    if (!tile) return;
     this._closeOverlay();
 
-    const host = document.createElement("div");
-    const sr = host.attachShadow({ mode: "open" });
-    sr.innerHTML = `
-      <style>
-        ${STREAM_CSS}
-        :host { position:fixed; inset:0; z-index:99999; background:#000;
-                --cgc-fit:contain; }
-        .wrap { position:absolute; inset:0; }
-        button { position:absolute; top:max(12px, env(safe-area-inset-top));
-                 right:12px; width:48px; height:48px; border-radius:50%;
-                 border:0; background:rgba(0,0,0,.6); color:#fff;
-                 font-size:28px; line-height:1; cursor:pointer; z-index:1; }
-        .title { position:absolute; left:16px; top:20px; color:#fff;
-                 font:500 16px sans-serif; text-shadow:0 0 4px #000; }
-      </style>
-      <div class="wrap"></div>
-      <div class="title"></div>
-      <button aria-label="Close">&times;</button>`;
-    sr.querySelector(".wrap").appendChild(makeStream(cam, this._config.go2rtc_url));
-    sr.querySelector(".title").textContent = cam.title || "";
-    sr.querySelector("button").addEventListener("click", () => this._closeOverlay());
+    // The popover top layer lifts the tile above everything without
+    // reparenting it; fall back to position:fixed where unsupported.
+    if (typeof tile.showPopover === "function") tile.showPopover();
+    else tile.classList.add("open");
+    this._open = tile;
 
     this._onKey = (e) => e.key === "Escape" && this._closeOverlay();
     window.addEventListener("keydown", this._onKey);
-    document.body.appendChild(host);
-    this._overlay = host;
 
     const secs = Number(this._config.auto_close_seconds);
     if (secs > 0) {
@@ -903,8 +923,13 @@ class CameraGridCard extends HTMLElement {
     clearTimeout(this._closeTimer);
     if (this._onKey) window.removeEventListener("keydown", this._onKey);
     this._onKey = null;
-    this._overlay?.remove();
-    this._overlay = null;
+    const tile = this._open;
+    this._open = null;
+    if (!tile) return;
+    tile.classList.remove("open");
+    if (typeof tile.hidePopover === "function" && tile.matches(":popover-open")) {
+      tile.hidePopover();
+    }
   }
 }
 

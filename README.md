@@ -55,7 +55,7 @@ A visual editor is included. Its camera list uses the object selector with `fiel
 - If the overlay is closed while the trigger is still `on`, it reopens only on the next transition into `on`.
 - If another camera's trigger fires while an overlay is open, the overlay switches to that camera.
 - Tapping a tile opens that camera as an overlay.
-- The overlay is a fixed element attached to `document.body`, not the browser Fullscreen API, which browsers block without a user gesture.
+- Full screen reuses the tile that is already in the grid (lifted into the browser's top layer via the Popover API, with a `position:fixed` fallback), so the running stream is not remounted or reconnected. The other tiles keep streaming in the background. It is not the browser Fullscreen API, which browsers block without a user gesture.
 
 ## Limitations
 
