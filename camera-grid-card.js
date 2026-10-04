@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -742,6 +742,18 @@ function makeStream(cam, globalUrl) {
 }
 
 
+// First <video> in a DOM subtree, looking through open shadow roots. Used to
+// observe the player inside Home Assistant's own camera view.
+function deepVideo(node) {
+  if (node.tagName === "VIDEO") return node;
+  const kids = [...(node.shadowRoot?.children || []), ...node.children];
+  for (const k of kids) {
+    const v = deepVideo(k);
+    if (v) return v;
+  }
+  return null;
+}
+
 // "Has real frames". Players pause themselves in hidden tabs, so a paused
 // video only counts as not playing while the tab is visible.
 const isPlaying = (v) =>
@@ -760,10 +772,9 @@ const isPlaying = (v) =>
  * "auto" (like high, but may fall back to low).
  */
 class AdaptiveStream {
-  constructor(cam, globalUrl, cfg) {
-    this._url = cam.url || globalUrl;
-    this._highName = cam.stream;
-    this._lowName = cam.stream_low;
+  constructor(cfg, makeHigh, makeLow) {
+    this._makeHigh = makeHigh;
+    this._makeLow = makeLow;
     this._cfg = cfg;
     this._mode = "low";
     this._lowEl = null;
@@ -827,10 +838,11 @@ class AdaptiveStream {
     return !this._netPoor() && Date.now() >= this._retryAt;
   }
 
-  _make(name, z) {
-    const el = document.createElement("camera-grid-stream");
-    el.src = wsUrl(this._url, name);
-    el.style.cssText = `position:absolute;inset:0;z-index:${z}`;
+  _make(which, z) {
+    const el = which === "high" ? this._makeHigh() : this._makeLow();
+    el.style.position = "absolute";
+    el.style.inset = "0";
+    el.style.zIndex = String(z);
     this.el.appendChild(el);
     return el;
   }
@@ -846,13 +858,13 @@ class AdaptiveStream {
   _apply() {
     if (this._wantHigh()) {
       if (!this._highEl) {
-        if (!this._lowEl) this._lowEl = this._make(this._lowName, 1);
-        this._highEl = this._make(this._highName, 0);
+        if (!this._lowEl) this._lowEl = this._make("low", 1);
+        this._highEl = this._make("high", 0);
         this._highReady = false;
         this._highSince = Date.now();
       }
     } else if (!this._lowEl) {
-      this._lowEl = this._make(this._lowName, 1);
+      this._lowEl = this._make("low", 1);
     }
   }
 
@@ -978,6 +990,7 @@ class CameraGridCard extends HTMLElement {
   set hass(hass) {
     const old = this._hass;
     this._hass = hass;
+    this._entityCards = this._entityCards.filter((c) => c.isConnected);
     for (const card of this._entityCards) card.hass = hass;
     if (old && this._config) this._checkTriggers(old, hass);
   }
@@ -1028,13 +1041,24 @@ class CameraGridCard extends HTMLElement {
   // or a placeholder while the config is incomplete.
   _makeSource(cam) {
     const entity = cam.entity || cam.camera_entity;
-    if (entity) return this._makeEntityView(entity);
-    if (cam.stream && cam.stream_low) {
-      const a = new AdaptiveStream(cam, this._config.go2rtc_url, this._config);
+    const entityLow = cam.entity_low || cam.camera_entity_low;
+    let makers = null;
+    if (entity && entityLow) {
+      makers = [() => this._makeEntityView(entity), () => this._makeEntityView(entityLow)];
+    } else if (!entity && cam.stream && cam.stream_low) {
+      const url = this._config.go2rtc_url;
+      makers = [
+        () => makeStream(cam, url),
+        () => makeStream({ ...cam, stream: cam.stream_low }, url),
+      ];
+    }
+    if (makers) {
+      const a = new AdaptiveStream(this._config, ...makers);
       a.setMode(this._config.grid_quality);
       this._adaptive.set(this._id(cam), a);
       return a.el;
     }
+    if (entity) return this._makeEntityView(entity);
     if (cam.stream) return makeStream(cam, this._config.go2rtc_url);
     const p = document.createElement("div");
     p.className = "placeholder";
@@ -1047,6 +1071,7 @@ class CameraGridCard extends HTMLElement {
     const gen = this._gen;
     const wrap = document.createElement("div");
     wrap.className = "entity-view";
+    Object.defineProperty(wrap, "video", { get: () => deepVideo(wrap) });
     const fail = (err) => {
       wrap.textContent = `Cannot show ${entity}`;
       console.error("camera-grid-card:", err);
@@ -1264,6 +1289,10 @@ const EDITOR_SCHEMA = [
           title: { label: "Title", selector: { text: {} } },
           entity: {
             label: "Camera entity (instead of a go2rtc stream)",
+            selector: { entity: { domain: "camera" } },
+          },
+          entity_low: {
+            label: "Low-quality camera entity (optional, with entity)",
             selector: { entity: { domain: "camera" } },
           },
           stream: { label: "go2rtc stream name (high quality)", selector: { text: {} } },
