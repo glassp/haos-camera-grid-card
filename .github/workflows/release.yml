@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches CARD_VERSION
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(sed -n 's/^const CARD_VERSION = "\(.*\)";/\1/p' camera-grid-card.js)"
+          echo "tag=$tag version=$ver"
+          test "$tag" = "$ver"
+      - name: Create release with card attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in v0.*|*-*) prerelease="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" camera-grid-card.js \
+            --title "$GITHUB_REF_NAME" --generate-notes $prerelease

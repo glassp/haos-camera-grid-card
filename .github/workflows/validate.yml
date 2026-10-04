@@ -1,0 +1,32 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          cp camera-grid-card.js /tmp/camera-grid-card.mjs
+          node --check /tmp/camera-grid-card.mjs
+      - name: Check hacs.json
+        run: node -e "JSON.parse(require('fs').readFileSync('hacs.json','utf8'))"
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: plugin
