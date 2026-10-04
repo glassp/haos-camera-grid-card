@@ -1,6 +1,6 @@
 # Camera Grid Card
 
-A small Home Assistant Lovelace card that shows [go2rtc](https://github.com/AlexxIT/go2rtc) streams in a grid. Each camera can have trigger entities. When one of them switches to the trigger state (`on` by default), that camera opens as a single full-screen overlay. A person closes it manually with the X button or Esc, or optionally after a timeout.
+A small Home Assistant Lovelace card that shows [go2rtc](https://github.com/AlexxIT/go2rtc) streams and/or Home Assistant camera entities in a grid. Each camera can have trigger entities. When one of them switches to the trigger state (`on` by default), that camera opens as a single full-screen overlay. A person closes it manually with the X button or Esc, or optionally after a timeout.
 
 ## Install
 
@@ -30,6 +30,8 @@ cameras:
       - binary_sensor.frontdoor_person
   - title: Garden
     stream: garden
+  - title: Driveway
+    entity: camera.driveway      # a Home Assistant camera entity instead
 ```
 
 | Option | Default | Description |
@@ -41,7 +43,8 @@ cameras:
 | `trigger_state` | `on` | State (or list of states) that opens the overlay. Use `"*"` to fire on every state change. |
 | `auto_close_seconds` | `0` | Close the overlay automatically after N seconds; `0` means manual only. |
 | `show_titles` | `true` | Show camera titles on tiles. |
-| `cameras[].stream` | – | go2rtc stream name (required). |
+| `cameras[].stream` | – | go2rtc stream name. Set either `stream` or `entity`. |
+| `cameras[].entity` | – | Home Assistant `camera.*` entity (alias: `camera_entity`). Rendered with Home Assistant's own live camera view. |
 | `cameras[].title` | – | Display title. |
 | `cameras[].url` | `go2rtc_url` | Per-camera go2rtc base URL override. |
 | `cameras[].id` | `stream` | Identifier, defaults to the stream name. |
@@ -59,7 +62,8 @@ A visual editor is included. Its camera list uses the object selector with `fiel
 
 ## Limitations
 
-- go2rtc streams only. The go2rtc host must be reachable from the browser; the card connects to `<go2rtc_url>/api/ws?src=<stream>` over WebSocket. No scripts are loaded from go2rtc.
+- go2rtc streams: the go2rtc host must be reachable from the browser; the card connects to `<go2rtc_url>/api/ws?src=<stream>` over WebSocket. No scripts are loaded from go2rtc.
+- Camera entities: shown through Home Assistant's built-in picture-entity live view (WebRTC/HLS as HA decides), so what plays depends on your camera integration. Tiles are live-only, with no PTZ or other controls.
 
 ## Credits
 

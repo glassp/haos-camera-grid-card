@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -739,6 +739,18 @@ function makeStream(cam, globalUrl) {
   return el;
 }
 
+// "16:9" | "16x9" | "1.78" | "56%" -> width / height as a number
+function parseAspect(v) {
+  const s = String(v).trim();
+  let r = NaN;
+  if (s.endsWith("%")) r = 100 / parseFloat(s);
+  else if (/[:x]/.test(s)) {
+    const [w, h] = s.split(/[:x]/).map(parseFloat);
+    r = w / h;
+  } else r = parseFloat(s);
+  return Number.isFinite(r) && r > 0 ? r : 16 / 9;
+}
+
 const STREAM_CSS = `
   camera-grid-stream { display:block; width:100%; height:100%; }
   camera-grid-stream video { width:100%; height:100%; object-fit: var(--cgc-fit, cover); }
@@ -750,6 +762,8 @@ class CameraGridCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._open = null;
     this._tiles = new Map();
+    this._entityCards = [];
+    this._gen = 0;
     this._closeTimer = null;
   }
 
@@ -784,6 +798,7 @@ class CameraGridCard extends HTMLElement {
   set hass(hass) {
     const old = this._hass;
     this._hass = hass;
+    for (const card of this._entityCards) card.hass = hass;
     if (old && this._config) this._checkTriggers(old, hass);
   }
 
@@ -801,7 +816,7 @@ class CameraGridCard extends HTMLElement {
   }
 
   _id(cam) {
-    return cam.id || cam.stream;
+    return cam.id || cam.stream || cam.entity || cam.camera_entity;
   }
 
   _checkTriggers(oldHass, hass) {
@@ -824,10 +839,64 @@ class CameraGridCard extends HTMLElement {
     }
   }
 
+  // Camera source: HA camera entity (via HA's own live view), go2rtc stream,
+  // or a placeholder while the config is incomplete.
+  _makeSource(cam) {
+    const entity = cam.entity || cam.camera_entity;
+    if (entity) return this._makeEntityView(entity);
+    if (cam.stream) return makeStream(cam, this._config.go2rtc_url);
+    const p = document.createElement("div");
+    p.className = "placeholder";
+    p.textContent = "Set a go2rtc stream or a camera entity";
+    return p;
+  }
+
+  _makeEntityView(entity) {
+    const c = this._config;
+    const gen = this._gen;
+    const wrap = document.createElement("div");
+    wrap.className = "entity-view";
+    const fail = (err) => {
+      wrap.textContent = `Cannot show ${entity}`;
+      console.error("camera-grid-card:", err);
+    };
+    if (typeof window.loadCardHelpers !== "function") {
+      fail(new Error("loadCardHelpers is not available"));
+      return wrap;
+    }
+    window
+      .loadCardHelpers()
+      .then((helpers) =>
+        helpers.createCardElement({
+          type: "picture-entity",
+          entity,
+          camera_view: "live",
+          show_name: false,
+          show_state: false,
+          aspect_ratio: String(c.aspect_ratio),
+          fit_mode: c.fit,
+          tap_action: { action: "none" },
+          hold_action: { action: "none" },
+          double_tap_action: { action: "none" },
+        })
+      )
+      .then((card) => {
+        if (gen !== this._gen) return; // re-rendered meanwhile
+        if (this._hass) card.hass = this._hass;
+        wrap.appendChild(card);
+        this._entityCards.push(card);
+      })
+      .catch(fail);
+    return wrap;
+  }
+
   _render() {
     this._closeOverlay();
+    this._gen++;
+    this._entityCards = [];
     const c = this._config;
     const root = this.shadowRoot;
+    const ar = parseAspect(c.aspect_ratio);
     // Full-screen styles, applied to the very same tile element that is in
     // the grid, so the already-playing stream is never remounted. Written as
     // two separate rules because one unsupported selector would void a list.
@@ -836,6 +905,8 @@ class CameraGridCard extends HTMLElement {
                  height:100dvh; border-radius:0; cursor:default;
                  z-index:99999; --cgc-fit:contain; }
         ${sel} .close { display:block; }
+        ${sel} .entity-view > * { width:min(100vw, calc(100vh * ${ar}));
+                                  width:min(100vw, calc(100dvh * ${ar})); }
         ${sel} .title { left:16px; top:20px; bottom:auto; font-size:16px; }`;
     root.innerHTML = `
       <style>
@@ -859,6 +930,15 @@ class CameraGridCard extends HTMLElement {
                  line-height:1; cursor:pointer; z-index:1; }
         ${openRules(".tile:popover-open")}
         ${openRules(".tile.open")}
+        .entity-view { position:absolute; inset:0; display:flex;
+                       align-items:center; justify-content:center;
+                       pointer-events:none; color:#fff; font-size:12px;
+                       --ha-card-border-radius:0; --ha-card-box-shadow:none;
+                       --ha-card-border-width:0; }
+        .entity-view > * { display:block; width:100%; }
+        .placeholder { position:absolute; inset:0; display:flex;
+                       align-items:center; justify-content:center;
+                       color:#bbb; font-size:12px; text-align:center; }
         .empty { padding:16px; color:var(--secondary-text-color); }
       </style>
       <div class="grid"></div>`;
@@ -874,7 +954,7 @@ class CameraGridCard extends HTMLElement {
       const tile = document.createElement("div");
       tile.className = "tile";
       tile.setAttribute("popover", "manual");
-      tile.appendChild(makeStream(cam, c.go2rtc_url));
+      tile.appendChild(this._makeSource(cam));
       if (c.show_titles && cam.title) {
         const t = document.createElement("div");
         t.className = "title";
@@ -971,7 +1051,11 @@ const EDITOR_SCHEMA = [
         label_field: "title",
         fields: {
           title: { label: "Title", selector: { text: {} } },
-          stream: { label: "go2rtc stream name", required: true, selector: { text: {} } },
+          entity: {
+            label: "Camera entity (instead of a go2rtc stream)",
+            selector: { entity: { domain: "camera" } },
+          },
+          stream: { label: "go2rtc stream name", selector: { text: {} } },
           url: { label: "go2rtc URL (override)", selector: { text: {} } },
           id: { label: "ID (defaults to stream)", selector: { text: {} } },
           triggers: {
