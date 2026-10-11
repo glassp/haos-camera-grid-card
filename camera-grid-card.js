@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.4.1";
+const CARD_VERSION = "1.4.2";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
@@ -1186,7 +1186,7 @@ class CameraGridCard extends HTMLElement {
                 padding:0; border:0; display:block; overflow:hidden;
                 background:#000; color:#fff;
                 border-radius: var(--ha-card-border-radius, 12px);
-                cursor:pointer; }
+                cursor:pointer; isolation:isolate; }
         .title { position:absolute; left:8px; bottom:6px; color:#fff;
                  font-size:12px; text-shadow:0 0 4px #000; pointer-events:none;
                  z-index:10; }
