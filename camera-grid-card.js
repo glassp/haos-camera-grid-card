@@ -8,7 +8,7 @@
  * resource  /local/camera-grid-card.js  (type: JavaScript module).
  */
 
-const CARD_VERSION = "1.4.1";
+const CARD_VERSION = "1.4.2";
 
 /*
  * ---- Vendored: go2rtc VideoRTC player (MIT, Copyright (c) 2022 Alexey Khit,
